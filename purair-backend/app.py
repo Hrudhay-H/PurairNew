@@ -1,35 +1,46 @@
+# app.py — Render Web Service + Supabase + LSTM Inference
+import os
 import numpy as np
 import joblib
 import tensorflow as tf
 from fastapi import FastAPI
 from pydantic import BaseModel
+from supabase import create_client
 
-app = FastAPI()
-
-# Load SavedModel directory
-model = tf.keras.models.load_model("saved_model_purair")
-
-# Load scalers
-scaler_X = joblib.load("scaler_X.pkl")
-scaler_y = joblib.load("scaler_y.pkl")
-
+# -----------------------------
+# CONFIG
+# -----------------------------
 WINDOW = 15
 FEATURES = 4
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# -----------------------------
+# LOAD MODEL AND SCALERS
+# -----------------------------
+model = tf.keras.models.load_model("saved_model")
+scaler_X = joblib.load("scaler_X.pkl")
+scaler_y = joblib.load("scaler_y.pkl")
+
+app = FastAPI()
+
+# -----------------------------
+# MANUAL PREDICTION INPUT
+# -----------------------------
 class Reading(BaseModel):
     air_quality: float
     temperature: float
     humidity: float
     anomaly_flag: int = 0
 
-
 class PredictionRequest(BaseModel):
     window: list[Reading]
 
-
 @app.post("/predict")
-def predict_egg_production(req: PredictionRequest):
+def manual_predict(req: PredictionRequest):
 
     if len(req.window) != WINDOW:
         return {"error": f"Expected {WINDOW} readings, got {len(req.window)}"}
@@ -44,31 +55,75 @@ def predict_egg_production(req: PredictionRequest):
         for r in req.window
     ], dtype=np.float32)
 
-    # Scale features
-    X_scaled = scaler_X.transform(X)
-    X_scaled = X_scaled.reshape(1, WINDOW, FEATURES)
+    X_scaled = scaler_X.transform(X).reshape(1, WINDOW, FEATURES)
 
-    # Predict
-    y_scaled = model.predict(X_scaled)[0][0]
+    pred_scaled = model.predict(X_scaled)[0][0]
+    pred = scaler_y.inverse_transform([[pred_scaled]])[0][0]
 
-    # Reverse scaling
-    pred = scaler_y.inverse_transform([[y_scaled]])[0][0]
-
-    # Categorize
-    if pred < 3600:
-        cat = "Low"
-    elif pred > 4200:
-        cat = "High"
-    else:
-        cat = "Medium"
+    category = (
+        "Low" if pred < 3600 else
+        "High" if pred > 4200 else
+        "Medium"
+    )
 
     return {
         "predicted_eggs": float(pred),
-        "category": cat,
-        "confidence": 0.90
+        "category": category
     }
 
+# -----------------------------
+# LIVE SUPABASE PREDICTION
+# -----------------------------
+@app.get("/predict-live")
+def predict_live():
 
+    # Fetch latest 15 rows
+    response = (
+        supabase
+        .table("sensor_readings")
+        .select("*")
+        .order("timestamp", desc=True)
+        .limit(WINDOW)
+        .execute()
+    )
+
+    data = response.data
+
+    if not data or len(data) < WINDOW:
+        return {"error": f"Not enough data. Needed {WINDOW}, found {len(data)}"}
+
+    # Reverse to chronological
+    data = data[::-1]
+
+    X = np.array([
+        [
+            row["air_quality"],
+            row["temperature"],
+            row["humidity"],
+            row["anomaly"]
+        ]
+        for row in data
+    ], dtype=np.float32)
+
+    X_scaled = scaler_X.transform(X).reshape(1, WINDOW, FEATURES)
+
+    pred_scaled = model.predict(X_scaled)[0][0]
+    pred = scaler_y.inverse_transform([[pred_scaled]])[0][0]
+
+    category = (
+        "Low" if pred < 3600 else
+        "High" if pred > 4200 else
+        "Medium"
+    )
+
+    return {
+        "predicted_eggs": float(pred),
+        "category": category
+    }
+
+# -----------------------------
+# ROOT CHECK
+# -----------------------------
 @app.get("/")
-def home():
-    return {"message": "PURAIR LSTM API running on Render."}
+def root():
+    return {"status": "API is running", "model": "PURAIR LSTM"}
