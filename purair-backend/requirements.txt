@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+numpy
+pydantic
+tensorflow-cpu==2.15.0
+joblib
+h5py
+python-multipart
